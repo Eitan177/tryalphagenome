@@ -2,27 +2,32 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-import numpy as np
 from alphagenome.data import gene_annotation, genome, transcript
-from alphagenome.models import dna_client, variant_scorers
+from alphagenome.models import dna_client
 from alphagenome.visualization import plot_components
-import pkg_resources # Import the library to check package versions
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="AlphaGenome Variant Scorer",
+    page_title="AlphaGenome Variant Visualizer",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# --- Debugging Information ---
-try:
-    ag_version = pkg_resources.get_distribution("alphagenome").version
-    st.sidebar.info(f"AlphaGenome Version: `{ag_version}`")
-except pkg_resources.DistributionNotFound:
-    st.sidebar.error("AlphaGenome library not found.")
+# --- Global Variables & Constants ---
+ORGANISM_MAP = {
+    'human': dna_client.Organism.HOMO_SAPIENS,
+    'mouse': dna_client.Organism.MUS_MUSCULUS,
+}
 
+HG38_GTF_FEATHER = (
+    'https://storage.googleapis.com/alphagenome/reference/gencode/'
+    'hg38/gencode.v46.annotation.gtf.gz.feather'
+)
+MM10_GTF_FEATHER = (
+    'https://storage.googleapis.com/alphagenome/reference/gencode/'
+    'mm10/gencode.vM23.annotation.gtf.gz.feather'
+)
 
 # --- Caching Functions ---
 
@@ -34,7 +39,7 @@ def get_dna_model():
     api_key = st.secrets.get("ALPHAGENOME_API_KEY")
     if not api_key:
         st.error("AlphaGenome API key not found. Please add it to your Streamlit secrets.")
-        st.info("Create a file .streamlit/secrets.toml with ALPHAGENOME_API_KEY = 'your_key_here' for local testing, or add it in the advanced settings on Streamlit Community Cloud.")
+        st.info("For local testing, create a file at .streamlit/secrets.toml with the content: \n\nALPHAGENOME_API_KEY = \"YOUR_API_KEY_HERE\"")
         st.stop()
     try:
         return dna_client.create(api_key)
@@ -43,205 +48,172 @@ def get_dna_model():
         st.stop()
 
 @st.cache_data
-def get_gene_annotations(organism_enum):
+def get_transcript_extractors(organism_str):
     """
-    Caches the gene annotation data for a given organism.
-    FIX: Using `GeneAnnotationDb` as indicated by the runtime environment errors.
+    Loads and caches gene annotation data and creates transcript extractors.
     """
-    try:
-        if organism_enum == dna_client.Organism.HOMO_SAPIENS:
-            gtf_path = (
-                'https://storage.googleapis.com/alphagenome/reference/gencode/'
-                'hg38/gencode.v46.annotation.gtf.gz.feather'
-            )
+    organism = ORGANISM_MAP[organism_str]
+    with st.spinner('Loading gene annotation...'):
+        if organism == dna_client.Organism.HOMO_SAPIENS:
+            gtf_path = HG38_GTF_FEATHER
+        elif organism == dna_client.Organism.MUS_MUSCULUS:
+            gtf_path = MM10_GTF_FEATHER
         else:
-            gtf_path = (
-                'https://storage.googleapis.com/alphagenome/reference/gencode/'
-                'mm10/gencode.vM23.annotation.gtf.gz.feather'
-            )
-        
-        # Use the newer class name which the error messages indicate is correct.
-        return gene_annotation.GeneAnnotationDb(gtf_path)
+            st.error(f'Unsupported organism: {organism}')
+            st.stop()
 
-    except Exception as e:
-        st.error(f"Failed to load gene annotation data. Error: {e}")
-        return None
-
-# --- Main App UI ---
-
-st.title("🧬 AlphaGenome Variant Scoring & Visualization")
-st.write(
-    "This app uses the AlphaGenome model to predict the effects of genetic variants "
-    "on various genomic modalities and visualize the results."
-)
-
-# --- Sidebar for User Inputs ---
-
-with st.sidebar:
-    st.header("1. Variant Scoring")
-
-    organism_map = {
-        'Human': dna_client.Organism.HOMO_SAPIENS,
-        'Mouse': dna_client.Organism.MUS_MUSCULUS,
-    }
-    organism_label = st.selectbox("Organism", options=list(organism_map.keys()))
-    organism = organism_map[organism_label]
-
-    st.subheader("Variant Details")
-    col1, col2 = st.columns(2)
-    with col1:
-        variant_chromosome = st.text_input("Chromosome", "chr22")
-    with col2:
-        variant_position = st.number_input("Position", value=36201698, step=1, format="%d")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        variant_reference = st.text_input("Reference", "A")
-    with col4:
-        variant_alternate = st.text_input("Alternate", "C")
-
-    sequence_length_map = {
-        '1MB': dna_client.SEQUENCE_LENGTH_1MB,
-        '500KB': dna_client.SEQUENCE_LENGTH_500KB,
-        '100KB': dna_client.SEQUENCE_LENGTH_100KB,
-        '16KB': dna_client.SEQUENCE_LENGTH_16KB,
-        '2KB': dna_client.SEQUENCE_LENGTH_2KB,
-    }
-    sequence_length_label = st.selectbox("Sequence Length", options=list(sequence_length_map.keys()))
-    sequence_length = sequence_length_map[sequence_length_label]
-
-    score_button = st.button("Score Variant", use_container_width=True)
-
-# --- Main Content Area ---
-
-# Initialize session state
-if 'scores_df' not in st.session_state:
-    st.session_state.scores_df = None
-if 'variant' not in st.session_state:
-    st.session_state.variant = None
-if 'interval' not in st.session_state:
-    st.session_state.interval = None
-
-# Check for API key before proceeding
-if 'ALPHAGENOME_API_KEY' not in st.secrets:
-    st.warning("Please configure your AlphaGenome API key in Streamlit secrets to use this app.")
-else:
-    if score_button:
-        dna_model = get_dna_model()
-        try:
-            variant = genome.Variant(
-                chromosome=variant_chromosome,
-                position=variant_position,
-                reference_bases=variant_reference,
-                alternate_bases=variant_alternate,
-            )
-            interval = variant.reference_interval.resize(sequence_length)
-
-            with st.spinner("Scoring variant... This may take a moment."):
-                variant_scores = dna_model.score_variant(
-                    interval=interval,
-                    variant=variant,
-                    variant_scorers=list(variant_scorers.RECOMMENDED_VARIANT_SCORERS.values()),
-                )
-                scores_df = variant_scorers.tidy_scores(variant_scores)
-
-            st.session_state.scores_df = scores_df
-            st.session_state.variant = variant
-            st.session_state.interval = interval
-            st.session_state.organism = organism
-
-        except Exception as e:
-            st.error(f"An error occurred during scoring: {e}")
-            st.session_state.scores_df = None
-
-
-    if st.session_state.scores_df is not None:
-        st.header("📊 Scoring Results")
-        st.info(f"Displaying scores for variant: {st.session_state.variant}")
-
-        st.dataframe(st.session_state.scores_df)
-
-        csv = st.session_state.scores_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download Scores as CSV",
-            data=csv,
-            file_name=f'{st.session_state.variant}_scores.csv',
-            mime='text/csv',
+        gtf = pd.read_feather(gtf_path)
+        gtf_transcript = gene_annotation.filter_transcript_support_level(
+            gene_annotation.filter_protein_coding(gtf), ['1']
         )
+        transcript_extractor = transcript.TranscriptExtractor(gtf_transcript)
+        gtf_longest_transcript = gene_annotation.filter_to_longest_transcript(
+            gtf_transcript
+        )
+        longest_transcript_extractor = transcript.TranscriptExtractor(
+            gtf_longest_transcript
+        )
+        return transcript_extractor, longest_transcript_extractor
 
-        # --- Visualization Section ---
-        with st.sidebar:
-            st.header("2. Variant Visualization")
-            st.write("Select a track from the results to visualize its predicted effect.")
+@st.cache_data
+def predict_variant_cached(_dna_model, interval_str, variant_str, organism_str):
+    """
+    Cache wrapper for dna_model.predict_variant to avoid re-running predictions.
+    The _dna_model argument is used to invalidate the cache if the model changes,
+    but it's not directly used in the function body.
+    """
+    interval = genome.Interval.from_str(interval_str)
+    variant = genome.Variant.from_str(variant_str)
+    organism = dna_client.Organism[organism_str]
+    
+    # This is the correct prediction function based on the working Colab notebook
+    return _dna_model.predict_variant(
+      interval=interval,
+      variant=variant,
+      organism=organism,
+      requested_outputs=[*dna_client.OutputType],
+      ontology_terms=['EFO:0001187', 'EFO:0002067', 'EFO:0002784'],
+  )
 
-            unique_tracks = st.session_state.scores_df['track_name'].dropna().unique()
-            track_name = st.selectbox("Track to Visualize", options=unique_tracks)
+# --- Sidebar UI ---
+st.sidebar.title('Variant Visualizer')
+st.sidebar.header('Variant and Plotting Options')
 
-            st.subheader("Plotting Options")
-            plot_interval_width = st.number_input("Plot Interval Width (bp)", min_value=100, max_value=10001, value=2001, step=100)
-            plot_interval_shift = st.number_input("Plot Interval Shift (bp)", value=0, step=50)
+organism_choice = st.sidebar.selectbox('Organism', ['human', 'mouse'])
+variant_chromosome = st.sidebar.text_input('Chromosome', 'chr22')
+variant_position = st.sidebar.number_input('Position', value=36201698, format="%d")
+variant_reference_bases = st.sidebar.text_input('Reference Bases', 'A')
+variant_alternate_bases = st.sidebar.text_input('Alternate Bases', 'C')
+sequence_length_choice = st.sidebar.selectbox('Sequence Length', ["2KB", "16KB", "100KB", "500KB", "1MB"], index=4)
 
-            col5, col6 = st.columns(2)
-            with col5:
-                separate_strands = st.checkbox("Separate Strands", value=True)
-            with col6:
-                sashimi_style = st.checkbox("Sashimi Style", value=True)
+st.sidebar.header('Plotting Options')
+st.sidebar.subheader('Output Types')
+plot_rna_seq = st.sidebar.checkbox('RNA-SEQ', value=True)
+plot_splice_sites = st.sidebar.checkbox('SPLICE_SITES', value=True)
+plot_splice_junctions = st.sidebar.checkbox('SPLICE_JUNCTIONS', value=True)
+plot_cage = st.sidebar.checkbox('CAGE', value=True)
+plot_atac = st.sidebar.checkbox('ATAC', value=False)
+plot_dnase = st.sidebar.checkbox('DNASE', value=False)
+plot_chip_histone = st.sidebar.checkbox('CHIP_HISTONE', value=False)
+plot_chip_tf = st.sidebar.checkbox('CHIP_TF', value=False)
+plot_contact_maps = st.sidebar.checkbox('CONTACT_MAPS', value=False)
 
-            visualize_button = st.button("Visualize Variant Effect", use_container_width=True)
+st.sidebar.subheader('Gene Annotation')
+plot_gene_annotation = st.sidebar.checkbox('Plot Gene Annotation', value=True)
+plot_longest_transcript_only = st.sidebar.checkbox('Plot Longest Transcript Only', value=True)
 
-        if visualize_button and track_name:
-            try:
-                with st.spinner("Generating visualization..."):
-                    dna_model = get_dna_model()
-                    gene_annotations = get_gene_annotations(st.session_state.organism)
+st.sidebar.subheader('DNA Strand Filter')
+strand_filter = st.sidebar.radio('Filter to Strand', ('None', 'Positive', 'Negative'), index=0)
 
-                    # FIX: Using `predict_on_batch` as indicated by the runtime environment errors.
-                    predictions = dna_model.predict_on_batch(
-                        inputs={
-                            'interval': np.array([str(st.session_state.interval)]),
-                            'variant': np.array([str(st.session_state.variant)]),
-                        },
-                        tracks=[track_name]
-                    )
-                    # Extract the first (and only) result from the batch
-                    ref_data = pd.DataFrame(predictions['ref'][track_name][0])
-                    alt_data = pd.DataFrame(predictions['alt'][track_name][0])
+st.sidebar.subheader('Visualization Settings')
+plot_interval_width = st.sidebar.slider('Plot Interval Width (bp)', min_value=1024, max_value=200000, step=1024, value=43008)
+plot_interval_shift = st.sidebar.slider('Plot Interval Shift (bp)', min_value=-524288, max_value=524288, step=2048, value=0)
+ref_color = st.sidebar.color_picker('Reference Color', value='#808080')
+alt_color = st.sidebar.color_picker('Alternate Color', value='#FF0000')
+ref_alt_colors = {'REF': ref_color, 'ALT': alt_color}
 
+# --- Main App Logic ---
+dna_model = get_dna_model()
 
-                    # Setup plot components
-                    components = []
-                    
-                    if gene_annotations:
-                        transcript_extractor = transcript.TranscriptExtractor(gene_annotations)
-                        transcripts = transcript_extractor.extract_transcripts(st.session_state.interval)
-                        components.append(plot_components.GeneAnnotation(transcripts))
-                    
-                    ref_alt_colors = {'REF': '#1f77b4', 'ALT': '#ff7f0e'}
-                    ylabel_template = '{track}'
-                    is_splicing_track = 'SPLICE_SITE_USAGE' in track_name
-                    
-                    if sashimi_style and is_splicing_track:
-                        ref_plot = plot_components.Sashimi(ref_data, ylabel_template='REF: ' + ylabel_template)
-                        alt_plot = plot_components.Sashimi(alt_data, ylabel_template='ALT: ' + ylabel_template)
-                        components.extend([ref_plot, alt_plot])
-                    else:
-                        component = plot_components.OverlaidTracks(
-                            tdata={'REF': ref_data, 'ALT': alt_data},
-                            colors=ref_alt_colors,
-                            ylabel_template=ylabel_template,
-                            separate_strands=separate_strands,
-                        )
-                        components.append(component)
+if st.sidebar.button('Visualize Variant', use_container_width=True):
+    st.header(f"Visualizing variant: {variant_chromosome}:{variant_position}:{variant_reference_bases}>{variant_alternate_bases}")
 
-                    plot = plot_components.plot(
-                        components=components,
-                        interval=st.session_state.interval.shift(plot_interval_shift).resize(plot_interval_width),
-                        annotations=[plot_components.VariantAnnotation([st.session_state.variant])],
-                    )
-                    
-                    st.header(f"🔬 Visualization for {track_name}")
-                    st.altair_chart(plot, use_container_width=True)
+    variant = genome.Variant(
+        chromosome=variant_chromosome,
+        position=int(variant_position),
+        reference_bases=variant_reference_bases,
+        alternate_bases=variant_alternate_bases,
+    )
 
-            except Exception as e:
-                st.error(f"An error occurred during visualization: {e}")
+    sequence_length = dna_client.SUPPORTED_SEQUENCE_LENGTHS[f'SEQUENCE_LENGTH_{sequence_length_choice}']
+    interval = variant.reference_interval.resize(sequence_length)
+
+    transcript_extractor, longest_transcript_extractor = get_transcript_extractors(organism_choice)
+
+    output = predict_variant_cached(
+        dna_model,
+        interval_str=str(interval),
+        variant_str=str(variant),
+        organism_str=ORGANISM_MAP[organism_choice].name,
+    )
+
+    ref, alt = output.reference, output.alternate
+
+    if strand_filter == 'Positive':
+        ref = ref.filter_to_strand(strand='+')
+        alt = alt.filter_to_strand(strand='+')
+    elif strand_filter == 'Negative':
+        ref = ref.filter_to_strand(strand='-')
+        alt = alt.filter_to_strand(strand='-')
+
+    components = []
+    if plot_gene_annotation:
+        extractor = longest_transcript_extractor if plot_longest_transcript_only else transcript_extractor
+        transcripts = extractor.extract(interval)
+        components.append(plot_components.TranscriptAnnotation(transcripts))
+
+    plot_map = {
+        plot_atac: (ref.atac, alt.atac, 'ATAC'),
+        plot_cage: (ref.cage, alt.cage, 'CAGE'),
+        plot_chip_histone: (ref.chip_histone, alt.chip_histone, 'CHIP_HISTONE'),
+        plot_chip_tf: (ref.chip_tf, alt.chip_tf, 'CHIP_TF'),
+        plot_contact_maps: (ref.contact_maps, alt.contact_maps, 'CONTACT_MAPS'),
+        plot_dnase: (ref.dnase, alt.dnase, 'DNASE'),
+        plot_rna_seq: (ref.rna_seq, alt.rna_seq, 'RNA_SEQ'),
+        plot_splice_junctions: (ref.splice_junctions, alt.splice_junctions, 'SPLICE_JUNCTIONS'),
+        plot_splice_sites: (ref.splice_sites, alt.splice_sites, 'SPLICE_SITES'),
+    }
+
+    for should_plot, (ref_data, alt_data, output_type) in plot_map.items():
+        if should_plot:
+            if ref_data is None or ref_data.values.shape[-1] == 0:
+                st.warning(f'No tracks exist for {output_type} with the current filters.')
+                continue
+
+            if output_type == 'CONTACT_MAPS':
+                components.append(plot_components.ContactMapsDiff(tdata=alt_data - ref_data))
+            elif output_type == 'SPLICE_JUNCTIONS':
+                components.append(plot_components.Sashimi(ref_data, ylabel_template='REF: {track}'))
+                components.append(plot_components.Sashimi(alt_data, ylabel_template='ALT: {track}'))
+            else:
+                components.append(plot_components.OverlaidTracks(
+                    tdata={'REF': ref_data, 'ALT': alt_data},
+                    colors=ref_alt_colors,
+                    ylabel_template='{track}'
+                ))
+
+    if not components:
+        st.warning("No data to plot. Please select at least one output type to visualize.")
+    elif plot_interval_width > interval.width:
+        st.error(f'Plot Interval Width ({plot_interval_width}) must be less than Sequence Length ({interval.width}).')
+    else:
+        with st.spinner('Generating plot...'):
+            plot = plot_components.plot(
+                components=components,
+                interval=interval.shift(plot_interval_shift).resize(plot_interval_width),
+                annotations=[plot_components.VariantAnnotation([variant])],
+            )
+            st.altair_chart(plot, use_container_width=True)
+else:
+    st.info("Configure your variant in the sidebar and click 'Visualize Variant' to begin.")
 
