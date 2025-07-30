@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-import numpy as np  # Added for predict_on_batch
+import numpy as np
 from alphagenome.data import gene_annotation, genome, transcript
 from alphagenome.models import dna_client, variant_scorers
 from alphagenome.visualization import plot_components
@@ -35,7 +35,10 @@ def get_dna_model():
 
 @st.cache_data
 def get_gene_annotations(organism_enum):
-    """Caches the gene annotation data for a given organism."""
+    """
+    Caches the gene annotation data for a given organism.
+    FIX: Uses the `GeneAnnotation` class, which is correct for the provided library source code.
+    """
     try:
         if organism_enum == dna_client.Organism.HOMO_SAPIENS:
             gtf_path = (
@@ -47,8 +50,10 @@ def get_gene_annotations(organism_enum):
                 'https://storage.googleapis.com/alphagenome/reference/gencode/'
                 'mm10/gencode.vM23.annotation.gtf.gz.feather'
             )
-        # FIX: Changed GeneAnnotation to GeneAnnotationDb
-        return gene_annotation.GeneAnnotationDb(gtf_path)
+        
+        # Use the correct class name based on the provided source files.
+        return gene_annotation.GeneAnnotation(gtf_path)
+
     except Exception as e:
         st.error(f"Failed to load gene annotation data. Error: {e}")
         return None
@@ -181,32 +186,25 @@ else:
                     dna_model = get_dna_model()
                     gene_annotations = get_gene_annotations(st.session_state.organism)
 
-                    # FIX: Replaced predict with predict_on_batch and adjusted inputs/outputs
-                    predictions = dna_model.predict_on_batch(
-                        inputs={
-                            'interval': np.array([str(st.session_state.interval)]),
-                            'variant': np.array([str(st.session_state.variant)]),
-                        },
-                        tracks=[track_name]
+                    # FIX: Uses the `predict` method, which is correct for the provided library source code.
+                    ref_pred, alt_pred = dna_model.predict(
+                        interval=st.session_state.interval,
+                        tracks=[track_name],
+                        variant=st.session_state.variant
                     )
+                    ref_data = ref_pred.df
+                    alt_data = alt_pred.df
 
-                    # Extract the first (and only) result from the batch
-                    ref_data = pd.DataFrame(predictions['ref'][track_name][0])
-                    alt_data = pd.DataFrame(predictions['alt'][track_name][0])
-                    
                     # Setup plot components
                     components = []
                     
-                    # Add gene annotation track
                     if gene_annotations:
                         transcript_extractor = transcript.TranscriptExtractor(gene_annotations)
                         transcripts = transcript_extractor.extract_transcripts(st.session_state.interval)
                         components.append(plot_components.GeneAnnotation(transcripts))
                     
-                    # Add data track (sashimi or overlaid)
                     ref_alt_colors = {'REF': '#1f77b4', 'ALT': '#ff7f0e'}
                     ylabel_template = '{track}'
-                    
                     is_splicing_track = 'SPLICE_SITE_USAGE' in track_name
                     
                     if sashimi_style and is_splicing_track:
@@ -222,7 +220,6 @@ else:
                         )
                         components.append(component)
 
-                    # Final plot assembly
                     plot = plot_components.plot(
                         components=components,
                         interval=st.session_state.interval.shift(plot_interval_shift).resize(plot_interval_width),
@@ -234,3 +231,4 @@ else:
 
             except Exception as e:
                 st.error(f"An error occurred during visualization: {e}")
+
