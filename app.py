@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import numpy as np  # Added for predict_on_batch
 from alphagenome.data import gene_annotation, genome, transcript
 from alphagenome.models import dna_client, variant_scorers
 from alphagenome.visualization import plot_components
@@ -46,7 +47,8 @@ def get_gene_annotations(organism_enum):
                 'https://storage.googleapis.com/alphagenome/reference/gencode/'
                 'mm10/gencode.vM23.annotation.gtf.gz.feather'
             )
-        return gene_annotation.GeneAnnotation(gtf_path)
+        # FIX: Changed GeneAnnotation to GeneAnnotationDb
+        return gene_annotation.GeneAnnotationDb(gtf_path)
     except Exception as e:
         st.error(f"Failed to load gene annotation data. Error: {e}")
         return None
@@ -179,15 +181,18 @@ else:
                     dna_model = get_dna_model()
                     gene_annotations = get_gene_annotations(st.session_state.organism)
 
-                    # Get predictions for the selected track
-                    ref_pred, alt_pred = dna_model.predict(
-                        interval=st.session_state.interval,
-                        tracks=[track_name],
-                        variant=st.session_state.variant
+                    # FIX: Replaced predict with predict_on_batch and adjusted inputs/outputs
+                    predictions = dna_model.predict_on_batch(
+                        inputs={
+                            'interval': np.array([str(st.session_state.interval)]),
+                            'variant': np.array([str(st.session_state.variant)]),
+                        },
+                        tracks=[track_name]
                     )
 
-                    ref_data = ref_pred.df
-                    alt_data = alt_pred.df
+                    # Extract the first (and only) result from the batch
+                    ref_data = pd.DataFrame(predictions['ref'][track_name][0])
+                    alt_data = pd.DataFrame(predictions['alt'][track_name][0])
                     
                     # Setup plot components
                     components = []
