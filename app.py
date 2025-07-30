@@ -6,6 +6,7 @@ import numpy as np
 from alphagenome.data import gene_annotation, genome, transcript
 from alphagenome.models import dna_client, variant_scorers
 from alphagenome.visualization import plot_components
+import pkg_resources # Import the library to check package versions
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -14,6 +15,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# --- Debugging Information ---
+try:
+    ag_version = pkg_resources.get_distribution("alphagenome").version
+    st.sidebar.info(f"AlphaGenome Version: `{ag_version}`")
+except pkg_resources.DistributionNotFound:
+    st.sidebar.error("AlphaGenome library not found.")
+
 
 # --- Caching Functions ---
 
@@ -37,7 +46,7 @@ def get_dna_model():
 def get_gene_annotations(organism_enum):
     """
     Caches the gene annotation data for a given organism.
-    FIX: Uses the `GeneAnnotation` class, which is correct for the provided library source code.
+    NOTE: Using `GeneAnnotationDb` which is expected in newer alphagenome versions.
     """
     try:
         if organism_enum == dna_client.Organism.HOMO_SAPIENS:
@@ -51,8 +60,8 @@ def get_gene_annotations(organism_enum):
                 'mm10/gencode.vM23.annotation.gtf.gz.feather'
             )
         
-        # Use the correct class name based on the provided source files.
-        return gene_annotation.GeneAnnotation(gtf_path)
+        # Use the newer class name expected in alphagenome>=0.1.0
+        return gene_annotation.GeneAnnotationDb(gtf_path)
 
     except Exception as e:
         st.error(f"Failed to load gene annotation data. Error: {e}")
@@ -186,14 +195,18 @@ else:
                     dna_model = get_dna_model()
                     gene_annotations = get_gene_annotations(st.session_state.organism)
 
-                    # FIX: Uses the `predict` method, which is correct for the provided library source code.
-                    ref_pred, alt_pred = dna_model.predict(
-                        interval=st.session_state.interval,
-                        tracks=[track_name],
-                        variant=st.session_state.variant
+                    # Use the newer 'predict_on_batch' method expected in alphagenome>=0.1.0
+                    predictions = dna_model.predict_on_batch(
+                        inputs={
+                            'interval': np.array([str(st.session_state.interval)]),
+                            'variant': np.array([str(st.session_state.variant)]),
+                        },
+                        tracks=[track_name]
                     )
-                    ref_data = ref_pred.df
-                    alt_data = alt_pred.df
+                    # Extract the first (and only) result from the batch
+                    ref_data = pd.DataFrame(predictions['ref'][track_name][0])
+                    alt_data = pd.DataFrame(predictions['alt'][track_name][0])
+
 
                     # Setup plot components
                     components = []
@@ -231,4 +244,3 @@ else:
 
             except Exception as e:
                 st.error(f"An error occurred during visualization: {e}")
-
