@@ -46,7 +46,7 @@ def get_dna_model():
 def get_gene_annotations(organism_enum):
     """
     Caches the gene annotation data for a given organism.
-    NOTE: Using `GeneAnnotationDb` which is expected in newer alphagenome versions.
+    FIX: Reverted to `GeneAnnotation` as `alphagenome==0.1.0` does not have `GeneAnnotationDb`.
     """
     try:
         if organism_enum == dna_client.Organism.HOMO_SAPIENS:
@@ -60,8 +60,8 @@ def get_gene_annotations(organism_enum):
                 'mm10/gencode.vM23.annotation.gtf.gz.feather'
             )
         
-        # Use the newer class name expected in alphagenome>=0.1.0
-        return gene_annotation.GeneAnnotationDb(gtf_path)
+        # Use the older class name which is correct for version 0.1.0
+        return gene_annotation.GeneAnnotation(gtf_path)
 
     except Exception as e:
         st.error(f"Failed to load gene annotation data. Error: {e}")
@@ -195,18 +195,14 @@ else:
                     dna_model = get_dna_model()
                     gene_annotations = get_gene_annotations(st.session_state.organism)
 
-                    # Use the newer 'predict_on_batch' method expected in alphagenome>=0.1.0
-                    predictions = dna_model.predict_on_batch(
-                        inputs={
-                            'interval': np.array([str(st.session_state.interval)]),
-                            'variant': np.array([str(st.session_state.variant)]),
-                        },
-                        tracks=[track_name]
+                    # FIX: Reverted to `predict` as `alphagenome==0.1.0` does not have `predict_on_batch`.
+                    ref_pred, alt_pred = dna_model.predict(
+                        interval=st.session_state.interval,
+                        tracks=[track_name],
+                        variant=st.session_state.variant
                     )
-                    # Extract the first (and only) result from the batch
-                    ref_data = pd.DataFrame(predictions['ref'][track_name][0])
-                    alt_data = pd.DataFrame(predictions['alt'][track_name][0])
-
+                    ref_data = ref_pred.df
+                    alt_data = alt_pred.df
 
                     # Setup plot components
                     components = []
@@ -244,3 +240,4 @@ else:
 
             except Exception as e:
                 st.error(f"An error occurred during visualization: {e}")
+
